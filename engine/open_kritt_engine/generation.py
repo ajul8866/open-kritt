@@ -17,7 +17,7 @@ from .harnesses import HarnessError, harness_for, normalize_harness_name
 from .prompting import append_schema_prompt
 from .provider_credentials import provider_environment
 from .schema import EXTRACTOR_HELPER_FIELD
-from .workspace import codex_home_for_job, provider_account_lease
+from .workspace import codex_home_for_job, grok_home_for_job, provider_account_lease
 
 BUILTIN_KEYS = (
     "repo_full",
@@ -102,7 +102,7 @@ GENERATION_PROVIDER_ENV_KEYS = {
     "codex": frozenset({"CODEX_API_KEY", "OPENAI_API_KEY", "CODEX_HOME"}),
     "claude": frozenset({"ANTHROPIC_API_KEY"}),
     "openrouter": frozenset({"OPENROUTER_API_KEY"}),
-    "xai": frozenset({"XAI_API_KEY", "GROK_BIN"}),
+    "xai": frozenset({"XAI_API_KEY", "GROK_BIN", "GROK_HOME"}),
 }
 
 
@@ -253,6 +253,7 @@ def generation_environment(
     source: dict[str, str] | None = None,
     *,
     codex_home: str | None = None,
+    grok_home: str | None = None,
 ) -> dict[str, str]:
     """Return only the execution settings and credential for the selected provider."""
 
@@ -268,6 +269,13 @@ def generation_environment(
             configured_home = (source_env.get("ENGINE_CODEX_HOME") or "").split(",", 1)[0].strip()
             if configured_home:
                 env["CODEX_HOME"] = configured_home
+    if provider == "xai":
+        if grok_home:
+            env["GROK_HOME"] = grok_home
+        elif not env.get("GROK_HOME"):
+            configured_home = (source_env.get("ENGINE_GROK_HOME") or "").split(",", 1)[0].strip()
+            if configured_home:
+                env["GROK_HOME"] = configured_home
     return env
 
 
@@ -766,14 +774,23 @@ class GenerationRunner:
             if request["model_provider"] == "codex"
             else None
         )
-        env = generation_environment(request["model_provider"], codex_home=selected_codex_home)
+        selected_grok_home = (
+            grok_home_for_job(0, data_dir=getattr(self.config, "data_dir", None))
+            if request["model_provider"] == "xai"
+            else None
+        )
+        env = generation_environment(
+            request["model_provider"],
+            codex_home=selected_codex_home,
+            grok_home=selected_grok_home,
+        )
         last_error: Exception | None = None
         feedback = ""
         for attempt in range(1, attempts + 1):
             try:
                 with provider_account_lease(
                     request["model_provider"],
-                    selected_codex_home,
+                    selected_codex_home or selected_grok_home,
                     data_dir=getattr(self.config, "data_dir", None),
                 ):
                     with preserve_codex_auth_metadata(env):
