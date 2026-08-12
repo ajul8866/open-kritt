@@ -205,11 +205,7 @@ def test_tool_enabled_grok_sandbox_remaps_grok_home(monkeypatch, tmp_path):
         harnesses.shutil,
         "which",
         lambda name, path=None: (
-            "docker"
-            if name == "docker"
-            else "/usr/local/bin/grok"
-            if name == "grok"
-            else original_which(name)
+            "docker" if name == "docker" else "/usr/local/bin/grok" if name == "grok" else original_which(name)
         ),
     )
 
