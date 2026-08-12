@@ -824,6 +824,10 @@ def _scan_docker_command(
         "CODEX_HOME": f"{CLAUDE_RUNNER_HOME}/.codex",
         "CLAUDE_HOME": f"{CLAUDE_RUNNER_HOME}/.claude",
         "CLAUDE_CONFIG_DIR": f"{CLAUDE_RUNNER_HOME}/.claude",
+        # Remap provider homes into the mounted job HOME. Inheriting the host
+        # GROK_HOME path would point Grok at a path that does not exist inside
+        # the sandbox (breaking device-login auth.json for tool-enabled scans).
+        "GROK_HOME": f"{CLAUDE_RUNNER_HOME}/.grok",
         "XDG_CONFIG_HOME": f"{CLAUDE_RUNNER_HOME}/.config",
         "XDG_CACHE_HOME": f"{CLAUDE_RUNNER_HOME}/.cache",
         "XDG_DATA_HOME": f"{CLAUDE_RUNNER_HOME}/.local/share",
@@ -848,7 +852,6 @@ def _scan_docker_command(
         "CURSOR_AUTH_TOKEN",
         "CURSOR_AGENT_BIN",
         "GROK_BIN",
-        "GROK_HOME",
         "SSL_CERT_FILE",
         "SSL_CERT_DIR",
         "NODE_EXTRA_CA_CERTS",
