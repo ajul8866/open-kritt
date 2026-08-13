@@ -236,6 +236,82 @@ def test_grok_build_snapshot_image_prompt_stays_on_mounted_home(monkeypatch, tmp
     assert cmd[cmd.index("--cwd") + 1] == "/workspace"
 
 
+def test_tool_enabled_grok_sandbox_remaps_grok_home(monkeypatch, tmp_path):
+    """Device-login auth.json lives under the mounted job HOME/.grok.
+
+    The sandbox must remap GROK_HOME to /home/runner/.grok instead of
+    inheriting the host job path (which does not exist in the container).
+    """
+    import shutil
+
+    data_dir = tmp_path / "engine-data"
+    host_data_dir = tmp_path / "host-engine-data"
+    repo_dir = data_dir / "jobs" / "metadata-42" / "workspace"
+    home_dir = data_dir / "jobs" / "metadata-42" / "home"
+    grok_home = home_dir / ".grok"
+    repo_dir.mkdir(parents=True)
+    grok_home.mkdir(parents=True)
+    (grok_home / "auth.json").write_text('{"email":"user@example.test"}', encoding="utf-8")
+    captured = {}
+
+    monkeypatch.setenv("ENGINE_DATA_DIR", str(data_dir))
+    monkeypatch.setenv("ENGINE_DOCKER_DATA_DIR_HOST", str(host_data_dir))
+    monkeypatch.setenv("ENGINE_SCAN_RUNNER_IMAGE", "runner-image")
+    original_which = shutil.which
+    monkeypatch.setattr(
+        harnesses.shutil,
+        "which",
+        lambda name, path=None: (
+            "docker" if name == "docker" else "/usr/local/bin/grok" if name == "grok" else original_which(name)
+        ),
+    )
+
+    def fake_run_process(cmd, prompt, cwd, timeout, env=None):
+        captured["cmd"] = cmd
+        captured["env"] = env
+        return SimpleNamespace(
+            stdout=json.dumps(
+                {
+                    "structuredOutput": marked(
+                        {"stub": True, "stub_explanation": "No matching records.", "results": []}
+                    ),
+                    "usage": {"input_tokens": 1},
+                }
+            ),
+            stderr="",
+            returncode=0,
+        )
+
+    monkeypatch.setattr(harnesses, "_run_process", fake_run_process)
+
+    host_grok_home = str(grok_home)
+    result = GrokBuildHarness(timeout_seconds=5, model_provider="xai").run(
+        prompt="scan prompt",
+        schema=output_schema('{"thing":"string"}', multi_output=False),
+        repo_dir=str(repo_dir),
+        model="grok-4.5",
+        env={
+            "HOME": str(home_dir),
+            "GROK_HOME": host_grok_home,
+            "XAI_API_KEY": "xai-secret",
+            "PATH": "/usr/local/bin",
+        },
+        allow_tools=True,
+    )
+
+    assert result.payload["stub"] is True
+    cmd = captured["cmd"]
+    assert cmd[:3] == ["docker", "run", "--rm"]
+    assert "HOME=/home/runner" in cmd
+    assert "GROK_HOME=/home/runner/.grok" in cmd
+    assert f"GROK_HOME={host_grok_home}" not in cmd
+    # Job env still carries the host path for the outer process; only the
+    # container mapping must be remapped.
+    assert captured["env"]["GROK_HOME"] == host_grok_home
+    mounts = [cmd[index + 1] for index, value in enumerate(cmd) if value == "--mount"]
+    assert f"type=bind,src={host_data_dir / 'jobs' / 'metadata-42' / 'home'},dst=/home/runner" in mounts
+
+
 def test_grok_build_auth_error_is_classified(monkeypatch, tmp_path):
     def fake_run_process(cmd, prompt, cwd, timeout, env=None):
         raise HarnessError(
