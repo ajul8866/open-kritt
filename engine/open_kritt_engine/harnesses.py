@@ -6,7 +6,7 @@ import shutil
 import subprocess
 import tempfile
 import time
-from contextlib import nullcontext
+from contextlib import nullcontext, suppress
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
@@ -1983,18 +1983,13 @@ class GrokBuildHarness:
         model_name = (model or DEFAULT_GROK_BUILD_MODEL).strip() or DEFAULT_GROK_BUILD_MODEL
         workspace = Path(repo_dir)
         workspace.mkdir(parents=True, exist_ok=True)
+        # Unique filenames avoid collisions when tool-free generation shares a work dir.
         # --json-schema requires inline JSON (file paths are rejected by the CLI).
-        # Keep the prompt under HOME (same pattern as Codex schema/output temps):
-        # snapshot-image runners omit the workspace bind mount, so a prompt written
-        # into repo_dir would be invisible inside the container.
-        temp_parent = actual_env.get("HOME")
-        if not temp_parent or not Path(temp_parent).is_dir():
-            temp_parent = str(workspace)
+        suffix = f"{os.getpid()}.{time.time_ns()}"
+        prompt_path = workspace / f".open-kritt-grok-prompt.{suffix}.txt"
+        prompt_path.write_text(prompt, encoding="utf-8")
         schema_json = json.dumps(_grok_json_schema(schema))
-        with tempfile.TemporaryDirectory(dir=temp_parent) as tmp:
-            prompt_path = Path(tmp) / "prompt.txt"
-            prompt_path.write_text(prompt, encoding="utf-8")
-            _grant_job_temp_access(tmp, actual_env)
+        try:
             cmd = [
                 executable,
                 "--prompt-file",
@@ -2064,6 +2059,9 @@ class GrokBuildHarness:
             if normalize_model_provider(self.model_provider) == "xai":
                 usage = {**(usage or {}), "model_provider": "xai", "xai_model": model_name}
             return HarnessResult(payload=payload, usage=usage, output=process_output)
+        finally:
+            with suppress(OSError):
+                prompt_path.unlink(missing_ok=True)
 
 
 def normalize_harness_name(name: str) -> str:
