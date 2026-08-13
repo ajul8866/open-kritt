@@ -81,6 +81,8 @@ def test_xai_job_and_generation_environments_are_scoped(tmp_path):
 def test_grok_build_tool_free_command_and_structured_output(monkeypatch, tmp_path):
     captured = {}
     payload = marked({"stub": True, "stub_explanation": "No matching records.", "results": []})
+    home = tmp_path / "home"
+    home.mkdir()
 
     def fake_run_process(cmd, prompt, cwd, timeout, env=None):
         captured["cmd"] = cmd
@@ -111,10 +113,10 @@ def test_grok_build_tool_free_command_and_structured_output(monkeypatch, tmp_pat
     result = GrokBuildHarness(timeout_seconds=5, model_provider="xai").run(
         prompt="prompt body",
         schema=output_schema('{"thing":"string"}', multi_output=False),
-        repo_dir=str(tmp_path),
+        repo_dir=str(tmp_path / "workspace"),
         model="grok-4.5",
         thinking_effort="high",
-        env={"HOME": str(tmp_path / "home"), "XAI_API_KEY": "xai-secret", "PATH": "/usr/local/bin"},
+        env={"HOME": str(home), "XAI_API_KEY": "xai-secret", "PATH": "/usr/local/bin"},
         allow_tools=False,
     )
 
@@ -124,6 +126,8 @@ def test_grok_build_tool_free_command_and_structured_output(monkeypatch, tmp_pat
     cmd = captured["cmd"]
     assert cmd[0] == "/usr/local/bin/grok"
     assert "--prompt-file" in cmd
+    prompt_file = cmd[cmd.index("--prompt-file") + 1]
+    assert prompt_file.startswith(str(home))
     assert "--output-format" in cmd and cmd[cmd.index("--output-format") + 1] == "json"
     assert "--json-schema" in cmd
     schema_arg = cmd[cmd.index("--json-schema") + 1]
@@ -142,9 +146,12 @@ def test_grok_build_tool_free_command_and_structured_output(monkeypatch, tmp_pat
 def test_grok_build_tool_enabled_uses_bypass_permissions(monkeypatch, tmp_path):
     captured = {}
     payload = marked({"stub": True, "stub_explanation": "No matching records.", "results": []})
+    home = tmp_path / "home"
+    home.mkdir()
 
     def fake_scan_docker(cmd, repo_dir, env, **kwargs):
         captured["inner"] = cmd
+        captured["runner_image"] = kwargs.get("runner_image")
         return ["docker", "run", *cmd]
 
     def fake_run_process(cmd, prompt, cwd, timeout, env=None):
@@ -164,10 +171,10 @@ def test_grok_build_tool_enabled_uses_bypass_permissions(monkeypatch, tmp_path):
     result = GrokBuildHarness(timeout_seconds=5).run(
         prompt="scan prompt",
         schema=output_schema('{"thing":"string"}', multi_output=False),
-        repo_dir=str(tmp_path),
+        repo_dir=str(tmp_path / "workspace"),
         model="grok-4.5",
         thinking_effort="medium",
-        env={"HOME": str(tmp_path / "home"), "XAI_API_KEY": "xai-secret", "PATH": "/usr/local/bin"},
+        env={"HOME": str(home), "XAI_API_KEY": "xai-secret", "PATH": "/usr/local/bin"},
         allow_tools=True,
     )
 
@@ -177,6 +184,56 @@ def test_grok_build_tool_enabled_uses_bypass_permissions(monkeypatch, tmp_path):
     assert "--always-approve" in inner
     assert inner[inner.index("--permission-mode") + 1] == "bypassPermissions"
     assert "--tools" not in inner or inner[inner.index("--tools") + 1] != ""
+    prompt_file = inner[inner.index("--prompt-file") + 1]
+    assert prompt_file.startswith(str(home))
+    assert not prompt_file.startswith(str(tmp_path / "workspace"))
+
+
+def test_grok_build_snapshot_image_prompt_stays_on_mounted_home(monkeypatch, tmp_path):
+    """Snapshot runners omit the workspace bind mount; prompt must live under HOME."""
+    captured = {}
+    payload = marked({"stub": True, "stub_explanation": "No matching records.", "results": []})
+    data_dir = tmp_path / "engine-data"
+    host_data_dir = tmp_path / "host-engine-data"
+    repo_dir = data_dir / "jobs" / "metadata-42" / "workspace"
+    home_dir = data_dir / "jobs" / "metadata-42" / "home"
+    repo_dir.mkdir(parents=True)
+    home_dir.mkdir(parents=True)
+    monkeypatch.setenv("ENGINE_DATA_DIR", str(data_dir))
+    monkeypatch.setenv("ENGINE_DOCKER_DATA_DIR_HOST", str(host_data_dir))
+    monkeypatch.setattr(
+        harnesses.shutil, "which", lambda name, path=None: "docker" if name in {"docker", "grok"} else None
+    )
+
+    def fake_run_process(cmd, prompt, cwd, timeout, env=None):
+        captured["cmd"] = cmd
+        return SimpleNamespace(
+            stdout=json.dumps({"structuredOutput": payload, "usage": {"input_tokens": 1}}),
+            stderr="",
+            returncode=0,
+        )
+
+    monkeypatch.setattr(harnesses, "_run_process", fake_run_process)
+
+    result = GrokBuildHarness(timeout_seconds=5, model_provider="xai").run(
+        prompt="snapshot prompt",
+        schema=output_schema('{"thing":"string"}', multi_output=False),
+        repo_dir=str(repo_dir),
+        model="grok-4.5",
+        env={"HOME": str(home_dir), "XAI_API_KEY": "xai-secret", "PATH": "/usr/bin"},
+        allow_tools=True,
+        runner_image="open-kritt-workspace-snapshot:test",
+    )
+
+    assert result.payload == payload
+    cmd = captured["cmd"]
+    mounts = [cmd[index + 1] for index, value in enumerate(cmd) if value == "--mount"]
+    assert any(mount.endswith("dst=/home/runner") for mount in mounts)
+    assert not any("dst=/workspace" in mount for mount in mounts)
+    prompt_arg = cmd[cmd.index("--prompt-file") + 1]
+    assert prompt_arg.startswith("/home/runner/")
+    assert "/workspace/" not in prompt_arg
+    assert cmd[cmd.index("--cwd") + 1] == "/workspace"
 
 
 def test_grok_build_auth_error_is_classified(monkeypatch, tmp_path):
