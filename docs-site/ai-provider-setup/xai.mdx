@@ -138,6 +138,9 @@ with an exact model ID even when the catalog is unavailable.
   the account. Copy the exact ID from the model catalog or xAI documentation.
 - If a run starts but cannot use tools or return valid structured output, choose a model
   with the required capabilities or review Grok Build logs in the scan attempt output.
+- If Grok finishes immediately with a stub and never inspects the repository, the engine
+  treats that as a failed attempt and retries it. Scan jobs also keep Grok's plan mode
+  enabled and append a workspace-inspection rule so the agent must use tools first.
 
 See xAI's official [API documentation](https://docs.x.ai/) for current model availability
 and billing behavior.

@@ -276,9 +276,90 @@ def test_grok_build_tool_enabled_uses_bypass_permissions(monkeypatch, tmp_path):
     assert "--tools" not in inner or inner[inner.index("--tools") + 1] != ""
     assert "--disable-web-search" in inner
     assert "--no-subagents" in inner
-    assert "--no-plan" in inner
+    assert "--no-plan" not in inner
+    assert inner[inner.index("--rules") + 1] == harnesses.GROK_WORKSPACE_SYSTEM_PROMPT
     assert inner[inner.index("--deny") + 1] == "MCPTool"
     assert all(captured["env"].get(key) == value for key, value in harnesses.GROK_BUILD_RUNTIME_ENV.items())
+
+
+def test_grok_build_rejects_single_turn_tool_enabled_completion(monkeypatch, tmp_path):
+    payload = marked({"stub": True, "stub_explanation": "No matching records.", "results": []})
+
+    def fake_scan_docker(cmd, repo_dir, env, **kwargs):
+        return ["docker", "run", *cmd]
+
+    def fake_run_process(cmd, prompt, cwd, timeout, env=None):
+        return SimpleNamespace(
+            stdout=json.dumps(
+                {
+                    "structuredOutput": payload,
+                    "num_turns": 1,
+                    "stopReason": "end_turn",
+                    "usage": {"input_tokens": 8, "output_tokens": 20},
+                }
+            ),
+            stderr="",
+            returncode=0,
+        )
+
+    monkeypatch.setattr(harnesses, "_scan_docker_command", fake_scan_docker)
+    monkeypatch.setattr(harnesses, "_run_process", fake_run_process)
+    monkeypatch.setattr(
+        harnesses.shutil, "which", lambda name, path=None: "/usr/local/bin/grok" if name == "grok" else None
+    )
+
+    with pytest.raises(HarnessError) as exc_info:
+        GrokBuildHarness(timeout_seconds=5).run(
+            prompt="scan prompt",
+            schema=output_schema('{"thing":"string"}', multi_output=False),
+            repo_dir=str(tmp_path),
+            model="grok-4.6",
+            env={"HOME": str(tmp_path / "home"), "XAI_API_KEY": "xai-secret", "PATH": "/usr/local/bin"},
+            allow_tools=True,
+        )
+    assert exc_info.value.code == "invalid_output"
+    assert "without inspecting the workspace" in str(exc_info.value)
+
+
+def test_grok_build_accepts_multi_turn_stub_after_workspace_work(monkeypatch, tmp_path):
+    payload = marked({"stub": True, "stub_explanation": "Inspected the repo; no matching records.", "results": []})
+
+    def fake_scan_docker(cmd, repo_dir, env, **kwargs):
+        return ["docker", "run", *cmd]
+
+    def fake_run_process(cmd, prompt, cwd, timeout, env=None):
+        return SimpleNamespace(
+            stdout=json.dumps({"structuredOutput": payload, "num_turns": 4, "stopReason": "end_turn"}),
+            stderr="",
+            returncode=0,
+        )
+
+    monkeypatch.setattr(harnesses, "_scan_docker_command", fake_scan_docker)
+    monkeypatch.setattr(harnesses, "_run_process", fake_run_process)
+    monkeypatch.setattr(
+        harnesses.shutil, "which", lambda name, path=None: "/usr/local/bin/grok" if name == "grok" else None
+    )
+
+    result = GrokBuildHarness(timeout_seconds=5).run(
+        prompt="scan prompt",
+        schema=output_schema('{"thing":"string"}', multi_output=False),
+        repo_dir=str(tmp_path),
+        model="grok-4.6",
+        env={"HOME": str(tmp_path / "home"), "XAI_API_KEY": "xai-secret", "PATH": "/usr/local/bin"},
+        allow_tools=True,
+    )
+    assert result.payload == payload
+    assert result.usage["num_turns"] == 4
+
+
+def test_grok_skipped_workspace_work_uses_reported_turns():
+    assert harnesses._grok_skipped_workspace_work(None, allow_tools=True) is False
+    assert harnesses._grok_skipped_workspace_work({"num_turns": 1}, allow_tools=False) is False
+    assert harnesses._grok_skipped_workspace_work({"num_turns": 1}, allow_tools=True) is True
+    assert harnesses._grok_skipped_workspace_work({"num_turns": 0}, allow_tools=True) is True
+    assert harnesses._grok_skipped_workspace_work({"num_turns": 3}, allow_tools=True) is False
+    assert harnesses._grok_skipped_workspace_work({"modelUsage": {"grok-4.6": {"modelCalls": 1}}}, allow_tools=True)
+    assert not harnesses._grok_skipped_workspace_work({"modelUsage": {"grok-4.6": {"modelCalls": 5}}}, allow_tools=True)
 
 
 def test_grok_build_auth_error_is_classified(monkeypatch, tmp_path):

@@ -231,6 +231,13 @@ CLAUDE_WORKSPACE_SYSTEM_PROMPT = (
     "Do not search from filesystem root (/), /data, /root, /home, or other global paths. "
     "Use Claude Code file-search tools scoped to the workspace instead of broad shell traversal."
 )
+GROK_WORKSPACE_SYSTEM_PROMPT = (
+    "Inspect the workspace with tools before answering. "
+    "Use only files under the current working directory and dependency paths listed in WORKSPACE.json. "
+    "Do not search from filesystem root (/), /data, /root, /home, or other global paths. "
+    "Do not emit the final structured result until you have listed or read workspace files relevant to the task. "
+    "A stub is allowed only after that inspection."
+)
 TRUE_ENV_VALUES = {"1", "true", "yes", "on"}
 CLAUDE_RUNNER_WORKDIR = "/workspace"
 CLAUDE_RUNNER_HOME = "/home/runner"
@@ -1991,6 +1998,41 @@ def _grok_json_schema(schema: dict[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in schema.items() if key != "$schema"}
 
 
+def _grok_reported_model_rounds(usage: dict[str, Any] | None) -> int | None:
+    """Return Grok's reported model rounds, or None when the CLI omitted them."""
+
+    if not usage:
+        return None
+    turns = usage.get("num_turns")
+    if isinstance(turns, bool):
+        return None
+    if isinstance(turns, int | float):
+        return int(turns)
+    model_usage = usage.get("modelUsage")
+    if not isinstance(model_usage, dict):
+        return None
+    calls = 0
+    found = False
+    for item in model_usage.values():
+        if not isinstance(item, dict):
+            continue
+        model_calls = item.get("modelCalls")
+        if isinstance(model_calls, bool) or not isinstance(model_calls, int | float):
+            continue
+        found = True
+        calls += int(model_calls)
+    return calls if found else None
+
+
+def _grok_skipped_workspace_work(usage: dict[str, Any] | None, *, allow_tools: bool) -> bool:
+    """True when a tool-enabled Grok run finished without an agent tool loop."""
+
+    if not allow_tools:
+        return False
+    rounds = _grok_reported_model_rounds(usage)
+    return rounds is not None and rounds < 2
+
+
 def _extract_json_from_grok_json(stdout: str) -> tuple[dict[str, Any], dict[str, Any] | None]:
     try:
         wrapper = json.loads(stdout)
@@ -2086,7 +2128,6 @@ class GrokBuildHarness:
                 "--cwd",
                 str(workspace),
                 "--no-auto-update",
-                "--no-plan",
                 "--disable-web-search",
                 "--no-subagents",
                 "--deny",
@@ -2096,10 +2137,19 @@ class GrokBuildHarness:
             if effort in GROK_BUILD_THINKING_EFFORTS:
                 cmd.extend(["--reasoning-effort", effort])
             if allow_tools:
-                cmd.extend(["--always-approve", "--permission-mode", "bypassPermissions"])
+                cmd.extend(
+                    [
+                        "--always-approve",
+                        "--permission-mode",
+                        "bypassPermissions",
+                        "--rules",
+                        GROK_WORKSPACE_SYSTEM_PROMPT,
+                    ]
+                )
             else:
                 cmd.extend(
                     [
+                        "--no-plan",
                         "--permission-mode",
                         "dontAsk",
                         "--tools",
@@ -2138,6 +2188,16 @@ class GrokBuildHarness:
                     code="invalid_output",
                     harness="grok-build",
                 ) from exc
+            if _grok_skipped_workspace_work(usage, allow_tools=allow_tools):
+                raise HarnessError(
+                    "Grok Build finished without inspecting the workspace.",
+                    output=process_output,
+                    code="invalid_output",
+                    public_message=(
+                        "Grok finished immediately without inspecting the workspace. The attempt will be retried."
+                    ),
+                    harness="grok-build",
+                )
             if usage is None and thinking_effort:
                 usage = {"thinking_effort": thinking_effort}
             elif usage is not None and thinking_effort:
