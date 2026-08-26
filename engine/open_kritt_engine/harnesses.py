@@ -2024,13 +2024,18 @@ def _grok_reported_model_rounds(usage: dict[str, Any] | None) -> int | None:
     return calls if found else None
 
 
-def _grok_skipped_workspace_work(usage: dict[str, Any] | None, *, allow_tools: bool) -> bool:
-    """True when a tool-enabled Grok run finished without an agent tool loop."""
+def _grok_lacks_reported_agent_loop(usage: dict[str, Any] | None, *, allow_tools: bool) -> bool:
+    """True when a tool-enabled Grok run did not report two or more model rounds.
+
+    Grok Build 1.0.5 includes ``num_turns`` once the prompt reached the model.
+    Missing counters are treated as a no-op so a schema-valid stub cannot
+    complete a scan. This is a round-count check, not proof that files were read.
+    """
 
     if not allow_tools:
         return False
     rounds = _grok_reported_model_rounds(usage)
-    return rounds is not None and rounds < 2
+    return rounds is None or rounds < 2
 
 
 def _extract_json_from_grok_json(stdout: str) -> tuple[dict[str, Any], dict[str, Any] | None]:
@@ -2128,6 +2133,7 @@ class GrokBuildHarness:
                 "--cwd",
                 str(workspace),
                 "--no-auto-update",
+                "--no-plan",
                 "--disable-web-search",
                 "--no-subagents",
                 "--deny",
@@ -2149,7 +2155,6 @@ class GrokBuildHarness:
             else:
                 cmd.extend(
                     [
-                        "--no-plan",
                         "--permission-mode",
                         "dontAsk",
                         "--tools",
@@ -2188,13 +2193,13 @@ class GrokBuildHarness:
                     code="invalid_output",
                     harness="grok-build",
                 ) from exc
-            if _grok_skipped_workspace_work(usage, allow_tools=allow_tools):
+            if _grok_lacks_reported_agent_loop(usage, allow_tools=allow_tools):
                 raise HarnessError(
-                    "Grok Build finished without inspecting the workspace.",
+                    "Grok Build finished without a reported multi-round agent loop.",
                     output=process_output,
                     code="invalid_output",
                     public_message=(
-                        "Grok finished immediately without inspecting the workspace. The attempt will be retried."
+                        "Grok finished without a reported multi-round agent loop. The attempt will be retried."
                     ),
                     harness="grok-build",
                 )
